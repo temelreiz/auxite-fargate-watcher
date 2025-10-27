@@ -1,52 +1,63 @@
 name: Deploy Fargate Watcher
+
 on:
-  push: { branches: [ "main" ] }
+  push:
+    branches:
+      - main
   workflow_dispatch:
-env:
-  AWS_REGION: eu-central-1
-  ECR_REPOSITORY: auxite-watcher
-  ECS_CLUSTER: auxite-cluster
-  ECS_SERVICE: auxite-watcher-svc
-  ECS_TASK_FAMILY: auxite-watcher
-  CONTAINER_NAME: auxite-watcher
+
+permissions:
+  id-token: write        # OIDC için gerekli
+  contents: read         # repo içeriğini okuyabilsin
+
 jobs:
   deploy:
+    name: Deploy to AWS Fargate
     runs-on: ubuntu-latest
-    permissions: { id-token: write, contents: read }
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-      - id: ecr
+          role-to-assume: arn:aws:iam::809278147371:role/auxite-github-oidc
+          aws-region: eu-central-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-      - name: Build & Push image
+
+      - name: Build, tag, and push Docker image
         env:
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+          ECR_REGISTRY: 809278147371.dkr.ecr.eu-central-1.amazonaws.com
+          ECR_REPOSITORY: auxite-watcher
+          IMAGE_TAG: latest
         run: |
-          docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
-          echo "IMAGE_URI=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> $GITHUB_ENV
-      - id: render
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Render new ECS task definition
+        id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
           task-definition: task-def/auxite-watcher.json
-          container-name: ${{ env.CONTAINER_NAME }}
-          image: ${{ env.IMAGE_URI }}
-          environment-variables: |
-            WS_URL=${{ secrets.WS_URL }}
-            HTTP_URL=${{ secrets.HTTP_URL }}
-            CHAIN=${{ secrets.CHAIN }}
-            ORACLES=${{ secrets.ORACLES }}
-            WEBHOOK_URL=${{ secrets.WEBHOOK_URL }}
-            WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}
-            ROLLUP_WINDOW_SEC=${{ secrets.ROLLUP_WINDOW_SEC }}
-      - uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+          container-name: auxite-watcher
+          image: 809278147371.dkr.ecr.eu-central-1.amazonaws.com/auxite-watcher:latest
+
+      - name: Deploy ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
-          task-definition: ${{ steps.render.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
+          service: auxite-watcher-svc
+          cluster: auxite-cluster
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
           wait-for-service-stability: true
+
+      - name: Verify deployment
+        run: |
+          aws ecs describe-services \
+            --cluster auxite-cluster \
+            --services auxite-watcher-svc \
+            --region eu-central-1 \
+            --query "services[0].deployments"
