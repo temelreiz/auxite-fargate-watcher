@@ -1,0 +1,33 @@
+{
+  "family": "auxite-watcher",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::809278147371:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "auxite-watcher",
+      "image": "809278147371.dkr.ecr.eu-central-1.amazonaws.com/auxite-watcher:latest",
+      "essential": true,
+      "environment": [
+        { "name": "WS_URL", "value": "wss://base-sepolia.infura.io/ws/v3/<INFURA_KEY>" },
+        { "name": "HTTP_URL", "value": "https://sepolia.base.org" },
+        { "name": "CHAIN", "value": "base-sepolia" },
+        { "name": "ORACLES", "value": "0x4544287732ef700b724f72539368561dcec3ccda" },
+        { "name": "WEBHOOK_URL", "value": "https://api.auxite.io/api/oracle-hook" },
+        { "name": "WEBHOOK_SECRET", "value": "change-me" },
+        { "name": "ROLLUP_WINDOW_SEC", "value": "0" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/auxite-watcher",
+          "awslogs-region": "eu-central-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
+

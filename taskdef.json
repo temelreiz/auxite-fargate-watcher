@@ -1,0 +1,54 @@
+{
+  "family": "auxite-oracle-watcher",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/ecsTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "watcher",
+      "image": "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/auxite/oracle-watcher:latest",
+      "essential": true,
+      "environment": [
+        {
+          "name": "CHAIN",
+          "value": "base-sepolia"
+        },
+        {
+          "name": "ROLLUP_WINDOW_SEC",
+          "value": "2"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "WS_URL",
+          "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:WS_URL"
+        },
+        {
+          "name": "WEBHOOK_URL",
+          "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:WEBHOOK_URL"
+        },
+        {
+          "name": "WEBHOOK_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:WEBHOOK_SECRET"
+        },
+        {
+          "name": "ORACLES",
+          "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:ORACLES"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/auxite-oracle-watcher",
+          "awslogs-region": "<REGION>",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

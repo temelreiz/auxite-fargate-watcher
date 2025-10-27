@@ -1,0 +1,21 @@
+{
+  "name": "auxite-oracle-watcher",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p .",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "isows": "^1.0.7",
+    "undici": "^6.19.8",
+    "viem": "^2.38.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
