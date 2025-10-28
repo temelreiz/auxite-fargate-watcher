@@ -23,7 +23,7 @@
       "environment": [
         { "name": "WS_URL", "value": "wss://base-sepolia.infura.io/ws/v3/b281db2537f943bd8b228734bf5f3115" },
         { "name": "CHAIN", "value": "base-sepolia" },
-        { "name": "WEBHOOK_URL", "value": "https://api.auxite.io/api/oracle-hook" },
+        { "name": "WEBHOOK_URL", "value": "https://wallet.auxite.io/api/oracle-hook" },
         { "name": "WEBHOOK_SECRET", "value": "auxite-shared-secret" },
         { "name": "ORACLES", "value": "0x4544287732ef700b724f72539368561dcec3ccda" },
         { "name": "ROLLUP_WINDOW_SEC", "value": "0" }
