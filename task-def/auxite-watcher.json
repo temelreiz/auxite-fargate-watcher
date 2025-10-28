@@ -24,7 +24,7 @@
         { "name": "WS_URL", "value": "wss://base-sepolia.infura.io/ws/v3/OVERRIDE_BY_CI" },
         { "name": "CHAIN", "value": "base-sepolia" },
         { "name": "WEBHOOK_URL", "value": "https://api.auxite.io/api/oracle-hook" },
-        { "name": "WEBHOOK_SECRET", "value": "OVERRIDE_BY_CI" },
+        { "name": "WEBHOOK_SECRET", "value": "auxite-shared-secret" },
         { "name": "ORACLES", "value": "0x4544287732ef700b724f72539368561dcec3ccda" },
         { "name": "ROLLUP_WINDOW_SEC", "value": "0" }
       ]
