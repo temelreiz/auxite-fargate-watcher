@@ -68,3 +68,9 @@ jobs:
           AWS_ACCOUNT_ID=809278147371
           REGION=eu-central-1
           IMAGE=$AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO:latest
+
+          aws ecr describe-repositories --repository-names "$REPO" --region $REGION \
+          || aws ecr create-repository --repository-name "$REPO" --region $REGION
+
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
