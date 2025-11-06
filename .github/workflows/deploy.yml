@@ -27,6 +27,7 @@ jobs:
         with:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          audience: sts.amazonaws.com
 
       - name: Login ECR
         uses: aws-actions/amazon-ecr-login@v2
@@ -36,16 +37,18 @@ jobs:
       - name: Build & Push
         id: bp
         run: |
+          set -euo pipefail
           IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${REPO}"
           TAG="$(date +%Y%m%d-%H%M%S)"
-          echo "IMAGE=$IMAGE" >> $GITHUB_OUTPUT
-          echo "TAG=$TAG" >> $GITHUB_OUTPUT
+          echo "IMAGE=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
           test -f Dockerfile || { echo "Dockerfile yok! doğru path ile -f verin."; exit 1; }
           docker build -t "$IMAGE:$TAG" .
           docker push "$IMAGE:$TAG"
 
       - name: Prepare TaskDef
         run: |
+          set -euo pipefail
           TD_ARN=$(aws ecs describe-services \
             --cluster "${CLUSTER}" --services "${SERVICE}" --region "${AWS_REGION}" \
             --query 'services[0].taskDefinition' --output text)
@@ -68,6 +71,7 @@ jobs:
 
       - name: Register & Update
         run: |
+          set -euo pipefail
           NEW_TD_ARN=$(aws ecs register-task-definition \
             --cli-input-json file://td.register.json \
             --region "${AWS_REGION}" \
@@ -81,10 +85,3 @@ jobs:
 
       - name: Who am I
         run: aws sts get-caller-identity
-
-      - name: Configure AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-        aws-region: ${{ env.AWS_REGION }}
-        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}   # <-- ZORUNLU
-        audience: sts.amazonaws.com
