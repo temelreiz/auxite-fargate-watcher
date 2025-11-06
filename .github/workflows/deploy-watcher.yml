@@ -2,7 +2,7 @@ name: Deploy Watcher (ECS)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 env:
