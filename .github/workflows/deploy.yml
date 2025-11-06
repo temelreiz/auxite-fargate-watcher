@@ -81,3 +81,10 @@ jobs:
 
       - name: Who am I
         run: aws sts get-caller-identity
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+        aws-region: ${{ env.AWS_REGION }}
+        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}   # <-- ZORUNLU
+        audience: sts.amazonaws.com
