@@ -1,76 +1,83 @@
-name: Deploy Fargate Watcher
+name: Deploy Watcher (ECS)
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
+env:
+  AWS_REGION: eu-central-1
+  AWS_ACCOUNT_ID: 809278147371
+  REPO: auxite-watcher
+  CLUSTER: auxite2-cluster
+  SERVICE: auxite-watcher-service-jj992ugc
+
 permissions:
-  id-token: write        # OIDC için gerekli
-  contents: read         # repo içeriğini okuyabilsin
+  id-token: write
+  contents: read
 
 jobs:
   deploy:
-    name: Deploy to AWS Fargate
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::809278147371:role/auxite-github-oidc
-          aws-region: eu-central-1
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
 
-      - name: Login to ECR
-        id: login-ecr
+      - name: Login ECR
         uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build, tag, and push Docker image
-        env:
-          ECR_REGISTRY: 809278147371.dkr.ecr.eu-central-1.amazonaws.com
-          ECR_REPOSITORY: auxite-watcher
-          IMAGE_TAG: latest
-        run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-
-      - name: Render new ECS task definition
-        id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: task-def/auxite-watcher.json
-          container-name: auxite-watcher
-          image: 809278147371.dkr.ecr.eu-central-1.amazonaws.com/auxite-watcher:latest
+          registries: ${{ env.AWS_ACCOUNT_ID }}
 
-      - name: Deploy ECS service
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          service: auxite-watcher-svc
-          cluster: auxite-cluster
-          task-definition: ${{ steps.task-def.outputs.task-definition }}
-          wait-for-service-stability: true
-
-      - name: Verify deployment
+      - name: Build & Push
+        id: bp
         run: |
-          aws ecs describe-services \
-            --cluster auxite-cluster \
-            --services auxite-watcher-svc \
-            --region eu-central-1 \
-            --query "services[0].deployments"
+          IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${REPO}"
+          TAG="$(date +%Y%m%d-%H%M%S)"
+          echo "IMAGE=$IMAGE" >> $GITHUB_OUTPUT
+          echo "TAG=$TAG" >> $GITHUB_OUTPUT
+          test -f Dockerfile || { echo "Dockerfile yok! doğru path ile -f verin."; exit 1; }
+          docker build -t "$IMAGE:$TAG" .
+          docker push "$IMAGE:$TAG"
 
-      - name: Build & push
+      - name: Prepare TaskDef
         run: |
-          REPO=auxite-watcher
-          AWS_ACCOUNT_ID=809278147371
-          REGION=eu-central-1
-          IMAGE=$AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO:latest
+          TD_ARN=$(aws ecs describe-services \
+            --cluster "${CLUSTER}" --services "${SERVICE}" --region "${AWS_REGION}" \
+            --query 'services[0].taskDefinition' --output text)
+          aws ecs describe-task-definition \
+            --task-definition "$TD_ARN" --region "${AWS_REGION}" \
+            --query 'taskDefinition' > td.describe.json
 
-          aws ecr describe-repositories --repository-names "$REPO" --region $REGION \
-          || aws ecr create-repository --repository-name "$REPO" --region $REGION
+          IMAGE="${{ steps.bp.outputs.IMAGE }}"
+          TAG="${{ steps.bp.outputs.TAG }}"
 
-          docker build -t "$IMAGE" .
-          docker push "$IMAGE"
+          jq 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)
+              | .requiresCompatibilities=["FARGATE"]
+              | .networkMode="awsvpc"
+              | .containerDefinitions[0].image = (env.IMAGE + ":" + env.TAG)
+              | .pidMode? |= empty
+              | .ipcMode? |= empty
+              | .proxyConfiguration? |= empty
+              | .inferenceAccelerators? |= empty
+              | .ephemeralStorage? |= empty' td.describe.json > td.register.json
+
+      - name: Register & Update
+        run: |
+          NEW_TD_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://td.register.json \
+            --region "${AWS_REGION}" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service \
+            --cluster "${CLUSTER}" \
+            --service "${SERVICE}" \
+            --task-definition "$NEW_TD_ARN" \
+            --force-new-deployment \
+            --region "${AWS_REGION}"
+
+      - name: Who am I
+        run: aws sts get-caller-identity
