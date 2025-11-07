@@ -1,5 +1,10 @@
-name: Deploy Watcher (ECS)
-
+- name: Configure AWS (OIDC)
+  uses: aws-actions/configure-aws-credentials@v4
+  with:
+    aws-region: ${{ env.AWS_REGION }}
+    role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+    audience: sts.amazonaws.com
+    output-env-credentials: true
 on:
   push:
     branches: [ main, master ]
