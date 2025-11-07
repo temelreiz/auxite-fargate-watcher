@@ -30,7 +30,6 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           audience: sts.amazonaws.com
-          output-env-credentials: true
 
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
@@ -48,7 +47,7 @@ jobs:
           docker build --platform=linux/amd64 -t "$IMAGE:$TAG" .
           docker push "$IMAGE:$TAG"
 
-      - name: Prepare Task Definition (from current service)
+      - name: Prepare Task Definition from current service
         run: |
           set -euo pipefail
           TD_ARN=$(aws ecs describe-services \
