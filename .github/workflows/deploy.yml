@@ -1,14 +1,13 @@
-- name: Configure AWS (OIDC)
-  uses: aws-actions/configure-aws-credentials@v4
-  with:
-    aws-region: ${{ env.AWS_REGION }}
-    role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-    audience: sts.amazonaws.com
-    output-env-credentials: true
+name: Deploy Watcher (ECS)
+
 on:
   push:
-    branches: [ main, master ]
+    branches: [ master, main ]
   workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
 
 env:
   AWS_REGION: eu-central-1
@@ -17,15 +16,13 @@ env:
   CLUSTER: auxite2-cluster
   SERVICE: auxite-watcher-service-jj992ugc
 
-permissions:
-  id-token: write
-  contents: read
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -33,13 +30,14 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           audience: sts.amazonaws.com
+          output-env-credentials: true
 
-      - name: Login ECR
+      - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
         with:
           registries: ${{ env.AWS_ACCOUNT_ID }}
 
-      - name: Build & Push
+      - name: Build & Push Image
         id: bp
         run: |
           set -euo pipefail
@@ -47,44 +45,58 @@ jobs:
           TAG="$(date +%Y%m%d-%H%M%S)"
           echo "IMAGE=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
-          test -f Dockerfile || { echo "Dockerfile yok! doğru path ile -f verin."; exit 1; }
-          docker build -t "$IMAGE:$TAG" .
+          docker build --platform=linux/amd64 -t "$IMAGE:$TAG" .
           docker push "$IMAGE:$TAG"
 
-      - name: Prepare TaskDef
+      - name: Prepare Task Definition (from current service)
         run: |
           set -euo pipefail
           TD_ARN=$(aws ecs describe-services \
-            --cluster "${CLUSTER}" --services "${SERVICE}" --region "${AWS_REGION}" \
-            --query 'services[0].taskDefinition' --output text)
+            --cluster "${CLUSTER}" \
+            --services "${SERVICE}" \
+            --region "${AWS_REGION}" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
           aws ecs describe-task-definition \
-            --task-definition "$TD_ARN" --region "${AWS_REGION}" \
+            --task-definition "$TD_ARN" \
+            --region "${AWS_REGION}" \
             --query 'taskDefinition' > td.describe.json
 
           IMAGE="${{ steps.bp.outputs.IMAGE }}"
           TAG="${{ steps.bp.outputs.TAG }}"
 
-          jq 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)
-              | .requiresCompatibilities=["FARGATE"]
-              | .networkMode="awsvpc"
+          jq 'del(
+                .taskDefinitionArn,
+                .revision,
+                .status,
+                .requiresAttributes,
+                .compatibilities,
+                .registeredAt,
+                .registeredBy,
+                .deregisteredAt
+              )
               | .containerDefinitions[0].image = (env.IMAGE + ":" + env.TAG)
-              | .pidMode? |= empty
-              | .ipcMode? |= empty
-              | .proxyConfiguration? |= empty
-              | .inferenceAccelerators? |= empty
-              | .ephemeralStorage? |= empty' td.describe.json > td.register.json
+              ' td.describe.json > td.register.json
 
-      - name: Register & Update
+      - name: Register New Task Definition
+        id: register
         run: |
           set -euo pipefail
           NEW_TD_ARN=$(aws ecs register-task-definition \
             --cli-input-json file://td.register.json \
             --region "${AWS_REGION}" \
-            --query 'taskDefinition.taskDefinitionArn' --output text)
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "NEW_TD_ARN=$NEW_TD_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Update Service
+        run: |
+          set -euo pipefail
           aws ecs update-service \
             --cluster "${CLUSTER}" \
             --service "${SERVICE}" \
-            --task-definition "$NEW_TD_ARN" \
+            --task-definition "${{ steps.register.outputs.NEW_TD_ARN }}" \
             --force-new-deployment \
             --region "${AWS_REGION}"
 
