@@ -1,26 +1,24 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-# 1) Tüm deps (dev dahil) kur
+# 1) Dev dahil tüm dependency'ler
 COPY package*.json ./
 RUN npm ci
 
-# 2) Kaynakları kopyala
+# 2) Kaynaklar
 COPY tsconfig.json ./
 COPY src ./src
 
-# 3) Build
+# 3) TypeScript build
 RUN npm run build
 
-# ---- Runtime stage ----
+# ---- Runtime ----
 FROM node:20-alpine
 WORKDIR /app
 
-# Sadece prod deps
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-# Build çıktısını kopyala
 COPY --from=builder /app/dist ./dist
 
 CMD ["node", "dist/index.js"]
