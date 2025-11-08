@@ -14,7 +14,7 @@ env:
   AWS_ACCOUNT_ID: 809278147371
   REPO: auxite-watcher
   CLUSTER: auxite2-cluster
-  SERVICE: auxite-watcher-service-jj992ugc
+  SERVICE: auxite-watcher-service
 
 jobs:
   deploy:
