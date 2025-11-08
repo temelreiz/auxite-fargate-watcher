@@ -1,4 +1,50 @@
-import * as IsoWS from "isows";
+// --- ENV ---
+const {
+  WS_URL,
+  WS_ORIGIN = "https://wallet.auxite.io",
+  HTTP_URL,
+  CHAIN = "base",
+  ORACLES = "",
+  WEBHOOK_URL,
+  WEBHOOK_SECRET,
+  ROLLUP_WINDOW_SEC = "0",
+} = process.env as Record<string, string>;
+
+if (!WS_URL) throw new Error("WS_URL missing");
+if (!WEBHOOK_URL) throw new Error("WEBHOOK_URL missing");
+
+// --- WebSocket polyfill with Origin header ---
+import * as Isows from "isows";
+
+const BaseWS =
+  (Isows as any).WebSocket ||
+  (Isows as any).default ||
+  (Isows as any);
+
+class OriginWebSocket extends BaseWS {
+  constructor(url: string, protocols?: any) {
+    super(url, protocols, {
+      headers: {
+        Origin: WS_ORIGIN,
+      },
+    });
+  }
+}
+
+(globalThis as any).WebSocket = OriginWebSocket as any;
+
+// --- imports (viem + etc) ---
+import {
+  createPublicClient,
+  webSocket,
+  http,
+  parseAbiItem,
+  type Address,
+  type Log,
+  type Chain,
+} from "viem";
+import type { AbiEvent } from "abitype";
+import { base, baseSepolia, sepolia } from "viem/chains";
 import crypto from "crypto";
 import { request } from "undici";
 
@@ -8,92 +54,61 @@ const warn = (...a: any[]) =>
 const err = (...a: any[]) =>
   console.error(new Date().toISOString(), "[ERR] ", ...a);
 
-// --- ENV ---
+// --- Chain ---
+const chain: Chain =
+  CHAIN === "base-sepolia"
+    ? baseSepolia
+    : CHAIN === "sepolia"
+    ? sepolia
+    : base;
 
-const {
-  WS_URL,
-  WS_ORIGIN,
-  WEBHOOK_URL,
-  WEBHOOK_SECRET,
-  NODE_ENV = "production",
-} = process.env as Record<string, string>;
+// --- Clients ---
+const wsTransport = webSocket(WS_URL);
+const wsClient = createPublicClient({ chain, transport: wsTransport });
+const httpClient = HTTP_URL
+  ? createPublicClient({ chain, transport: http(HTTP_URL) })
+  : null;
 
-if (!WS_URL) throw new Error("WS_URL missing");
-if (!WEBHOOK_URL) throw new Error("WEBHOOK_URL missing");
+// --- Events ---
+const evPriceUpdated = parseAbiItem(
+  "event PriceUpdated(uint256 priceE6, address updater, uint256 ts)"
+) as unknown as AbiEvent;
 
-// --- WebSocket client with Origin header (Cloudflare için) ---
-
-const BaseWebSocket =
-  (IsoWS as any).WebSocket ||
-  (IsoWS as any).default ||
-  (IsoWS as any);
-
-class OriginWebSocket extends BaseWebSocket {
-  constructor(url: string, protocols?: any, options?: any) {
-    // ws signature: (url, protocols?, options?)
-    if (protocols && typeof protocols === "object" && !Array.isArray(protocols)) {
-      options = protocols;
-      protocols = undefined;
-    }
-
-    options = options || {};
-    if (WS_ORIGIN) {
-      options.headers = {
-        ...(options.headers || {}),
-        Origin: WS_ORIGIN,
-      };
-    }
-
-    super(url, protocols, options);
-  }
-}
-
-// --- Types ---
-
-type FeedPrice = {
+type Update = {
   symbol: string;
-  // server tarafının payload adlandırmasına göre esneklik:
-  priceGram?: number;
-  price_g?: number;
-  price?: number;
-};
-
-type FeedMessage = {
-  type: string;
-  data?: FeedPrice[];
-};
-
-type OracleUpdate = {
-  symbol: string;
-  pricePerGram: number;
+  priceE6: string;
   ts: number;
 };
 
-// --- State ---
+let buffer: Update[] = [];
+let timer: ReturnType<typeof setTimeout> | null = null;
 
-let lastHeartbeat = Date.now();
-
-// --- Helpers ---
-
-function extractPricePerGram(p: FeedPrice): number | null {
-  if (typeof p.priceGram === "number") return p.priceGram;
-  if (typeof p.price_g === "number") return p.price_g;
-  if (typeof p.price === "number") return p.price;
-  return null;
+function schedulePost() {
+  const roll = Number(ROLLUP_WINDOW_SEC || "0");
+  if (roll <= 0) {
+    void postUpdates();
+    return;
+  }
+  if (timer) return;
+  timer = setTimeout(() => {
+    timer = null;
+    void postUpdates();
+  }, roll * 1000);
 }
 
-async function postUpdates(updates: OracleUpdate[]) {
-  if (!updates.length) return;
+async function postUpdates() {
+  if (buffer.length === 0) return;
+
+  const batch = buffer.splice(0, buffer.length);
 
   const payload = JSON.stringify({
     ts: Math.floor(Date.now() / 1000),
-    prices: updates,
+    prices: batch,
   });
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
   };
-
   if (WEBHOOK_SECRET) {
     const sig = crypto
       .createHmac("sha256", WEBHOOK_SECRET)
@@ -103,18 +118,13 @@ async function postUpdates(updates: OracleUpdate[]) {
   }
 
   try {
-    const res = await request(WEBHOOK_URL!, {
+    const res = await request(WEBHOOK_URL, {
       method: "POST",
       headers,
       body: payload,
     });
-
     if (res.statusCode >= 200 && res.statusCode < 300) {
-      log(
-        `POST ${WEBHOOK_URL} OK (${updates.length} symbols: ${updates
-          .map((u) => u.symbol)
-          .join(",")})`
-      );
+      log(`POST ${WEBHOOK_URL} OK (${batch.length})`);
     } else {
       warn(`POST ${WEBHOOK_URL} status=${res.statusCode}`);
     }
@@ -123,84 +133,62 @@ async function postUpdates(updates: OracleUpdate[]) {
   }
 }
 
-function handleMessage(raw: string) {
-  let msg: FeedMessage;
-  try {
-    msg = JSON.parse(raw);
-  } catch {
-    return;
-  }
-
-  if (msg.type !== "prices" || !Array.isArray(msg.data)) return;
-
-  const wanted = new Set(["AUXG", "AUXS", "AUXPT", "AUXPD"]);
-
-  const updates: OracleUpdate[] = [];
-
-  for (const p of msg.data) {
-    if (!p || !p.symbol || !wanted.has(p.symbol)) continue;
-    const price = extractPricePerGram(p);
-    if (price == null || !isFinite(price)) continue;
-
-    updates.push({
-      symbol: p.symbol,
-      pricePerGram: price,
-      ts: Math.floor(Date.now() / 1000),
-    });
-  }
-
-  if (updates.length) {
-    log(
-      `Received prices: ${updates
-        .map((u) => `${u.symbol}=${u.pricePerGram}`)
-        .join(" ")}`
-    );
-    void postUpdates(updates);
-  }
+function handleWsMessage(msg: any) {
+  if (!msg || msg.type !== "prices" || !Array.isArray(msg.data)) return;
+  // Beklenen: AUXG, AUXS, AUXPT, AUXPD fiyatları (price per gram e6)
+  const updates: Update[] = msg.data.map((p: any) => ({
+    symbol: p.symbol,
+    priceE6: String(p.priceE6 ?? p.price_e6 ?? p.price ?? 0),
+    ts: Number(p.ts ?? Date.now() / 1000),
+  }));
+  buffer.push(...updates);
+  schedulePost();
 }
 
-// --- Main loop ---
+async function startWs() {
+  log(`Connecting WS: ${WS_URL} (Origin=${WS_ORIGIN})`);
 
-function connect() {
-  log(`Connecting to WS ${WS_URL} (origin=${WS_ORIGIN || "-"})`);
+  // viem client zaten global WebSocket'i kullanacak (Origin header’lı)
+  (wsClient as any).subscribe({
+    // low-level: viem versiyonuna göre değişir; yoksa direkt raw ws kullanılır.
+  });
 
+  // Eğer doğrudan ws ile dinliyorsan:
   const ws = new OriginWebSocket(WS_URL);
-
+  ws.onmessage = (ev: any) => {
+    try {
+      const data = JSON.parse(ev.data.toString());
+      handleWsMessage(data);
+    } catch (e) {
+      err("WS message parse error", e);
+    }
+  };
+  ws.onerror = (e: any) => {
+    err("WS error", e?.message || e);
+  };
   ws.onopen = () => {
     log("WS connected");
-    lastHeartbeat = Date.now();
   };
-
-  ws.onmessage = (ev: any) => {
-    lastHeartbeat = Date.now();
-    const data =
-      typeof ev.data === "string" ? ev.data : ev.data?.toString?.() ?? "";
-    if (!data) return;
-    handleMessage(data);
-  };
-
-  ws.onerror = (ev: any) => {
-    err("WS error", ev?.message || ev);
-  };
-
-  ws.onclose = (ev: any) => {
-    warn(
-      `WS closed code=${ev?.code} reason=${ev?.reason || ""}, reconnecting...`
-    );
-    setTimeout(connect, 3000);
+  ws.onclose = () => {
+    warn("WS closed");
   };
 }
 
-// --- Health log ---
+async function main() {
+  log(`Watcher starting (TD=WS gram feed)`);
+  await startWs();
+  setInterval(() => log("alive / buffer:", buffer.length), 60_000);
+}
 
-setInterval(() => {
-  const diff = Math.floor((Date.now() - lastHeartbeat) / 1000);
-  log(`alive / lastMessageAgo=${diff}s`);
-}, 60_000);
+process.on("SIGTERM", async () => {
+  log("SIGTERM received, flushing...");
+  await postUpdates();
+  process.exit(0);
+});
+process.on("SIGINT", async () => {
+  log("SIGINT received, flushing...");
+  await postUpdates();
+  process.exit(0);
+});
 
-// --- Start ---
-
-log(
-  `Auxite watcher starting (mode=price-feed, url=${WS_URL}, env=${NODE_ENV})`
-);
-connect();
+void main();
