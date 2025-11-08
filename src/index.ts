@@ -1,6 +1,8 @@
-// --- WebSocket polyfill & Origin header for viem ---
+// src/index.ts
 
-import WebSocketLib from "isows";
+// --- WebSocket polyfill (Node + Origin header için) ---
+import * as IsomorphicWS from "isows";
+
 import {
   createPublicClient,
   webSocket,
@@ -15,12 +17,6 @@ import { base, baseSepolia, sepolia } from "viem/chains";
 import crypto from "crypto";
 import { request } from "undici";
 
-const log = (...a: any[]) => console.log(new Date().toISOString(), ...a);
-const warn = (...a: any[]) =>
-  console.warn(new Date().toISOString(), "[WARN]", ...a);
-const err = (...a: any[]) =>
-  console.error(new Date().toISOString(), "[ERR] ", ...a);
-
 // --- ENV ---
 const {
   WS_URL,
@@ -30,29 +26,47 @@ const {
   WEBHOOK_URL,
   WEBHOOK_SECRET,
   ROLLUP_WINDOW_SEC = "0",
-  WS_ORIGIN,
+  WS_ORIGIN = "https://wallet.auxite.io", // default: prod origin
 } = process.env as Record<string, string>;
 
 if (!WS_URL) throw new Error("WS_URL missing");
 if (!WEBHOOK_URL) throw new Error("WEBHOOK_URL missing");
 
-const chain: Chain =
-  CHAIN === "base-sepolia" ? baseSepolia : CHAIN === "sepolia" ? sepolia : base;
+// --- Global WebSocket override (viem burayı kullanacak) ---
+// isows: default export veya { WebSocket } gelebiliyor, ikisini de handle edelim.
+const BaseWS: any =
+  (IsomorphicWS as any).WebSocket || (IsomorphicWS as any);
 
-// WebSocket constructor: her bağlantıya Origin ekle
-const WebSocketWithOrigin = (url: string) => {
-  const opts: any = { headers: {} };
+// viem `new WebSocket(url)` çağırdığı için, global'e constructible bir fonksiyon veriyoruz.
+// Her çağrıda Origin header'ını enjekte ediyoruz.
+function WebSocketWithOrigin(this: any, url: string, protocols?: any) {
+  const options: any = {};
   if (WS_ORIGIN) {
-    opts.headers.Origin = WS_ORIGIN;
+    options.headers = { Origin: WS_ORIGIN };
   }
-  return new (WebSocketLib as any)(url, opts);
-};
+  return new BaseWS(url, protocols, options);
+}
 
-// --- Clients ---
-const wsTransport = webSocket(WS_URL, {
-  // viem burada verdiğimiz ctor'u kullanacak
-  webSocketConstructor: WebSocketWithOrigin as any,
-});
+// eslint vs TS kafaya takmasın diye `any` cast.
+(globalThis as any).WebSocket = WebSocketWithOrigin as any;
+
+// --- Logging helpers ---
+const log = (...a: any[]) => console.log(new Date().toISOString(), ...a);
+const warn = (...a: any[]) =>
+  console.warn(new Date().toISOString(), "[WARN]", ...a);
+const err = (...a: any[]) =>
+  console.error(new Date().toISOString(), "[ERR] ", ...a);
+
+// --- Chain seçimi ---
+const chain: Chain =
+  CHAIN === "base-sepolia"
+    ? baseSepolia
+    : CHAIN === "sepolia"
+    ? sepolia
+    : base;
+
+// --- viem clients ---
+const wsTransport = webSocket(WS_URL);
 const wsClient = createPublicClient({ chain, transport: wsTransport });
 
 const httpClient = HTTP_URL
@@ -72,7 +86,10 @@ const evPriceUpdated = parseAbiItem(
 const addrs = ORACLES.split(",")
   .map((s) => s.trim())
   .filter(Boolean) as Address[];
-if (addrs.length === 0) warn("No ORACLES provided; watcher will idle.");
+
+if (addrs.length === 0) {
+  warn("No ORACLES provided; watcher will idle.");
+}
 
 type Update = {
   address: Address;
@@ -95,7 +112,10 @@ function recordOnce(lg: Log, rec: Update) {
   const k = seenKey(lg);
   if (seen.has(k)) return;
   seen.add(k);
-  if (seen.size > 5000) seen.clear();
+  if (seen.size > 5000) {
+    // çok büyümesin
+    seen.clear();
+  }
   buffer.push(rec);
 }
 
@@ -109,7 +129,10 @@ async function postUpdates() {
     ts: Math.floor(Date.now() / 1000),
   });
 
-  const headers: Record<string, string> = { "content-type": "application/json" };
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  };
+
   if (WEBHOOK_SECRET) {
     const sig = crypto
       .createHmac("sha256", WEBHOOK_SECRET)
@@ -125,6 +148,7 @@ async function postUpdates() {
       headers,
       body: payload,
     });
+
     if (res.statusCode >= 200 && res.statusCode < 300) {
       log(`POST ${WEBHOOK_URL} OK (${batch.length})`);
     } else {
@@ -150,16 +174,19 @@ function schedulePost() {
 
 // --- WS Watchers ---
 function attachWsWatchers(address: Address) {
+  // PriceUpdated
   (wsClient as any).watchEvent({
     address,
     event: evPriceUpdated,
-    batch: true,
     onLogs: (logs: Log[]) => {
       log("↪️ onLogs WS PriceUpdated", address, logs.length);
       for (const lg of logs) {
         const args: any = (lg as any).args;
-        const priceE6: bigint = Array.isArray(args) ? args[0] : args?.priceE6;
+        const priceE6: bigint = Array.isArray(args)
+          ? args[0]
+          : args?.priceE6;
         const ts: bigint = Array.isArray(args) ? args[2] : args?.ts;
+
         recordOnce(lg, {
           address,
           current: priceE6.toString(),
@@ -171,21 +198,25 @@ function attachWsWatchers(address: Address) {
     },
     onError: (e: any) =>
       err(`watchEvent(WS) PriceUpdated @${address}`, e?.message || e),
+    batch: true,
   });
   log(`watchEvent(WS) PriceUpdated attached -> ${address}`);
 
+  // AnswerUpdated
   (wsClient as any).watchEvent({
     address,
     event: evAnswerUpdated,
-    batch: true,
     onLogs: (logs: Log[]) => {
       log("↪️ onLogs WS AnswerUpdated", address, logs.length);
       for (const lg of logs) {
         const args: any = (lg as any).args;
-        const current: bigint = Array.isArray(args) ? args[0] : args?.current;
+        const current: bigint = Array.isArray(args)
+          ? args[0]
+          : args?.current;
         const updatedAt: bigint = Array.isArray(args)
           ? args[1]
           : args?.updatedAt;
+
         recordOnce(lg, {
           address,
           current: current.toString(),
@@ -197,11 +228,12 @@ function attachWsWatchers(address: Address) {
     },
     onError: (e: any) =>
       err(`watchEvent(WS) AnswerUpdated @${address}`, e?.message || e),
+    batch: true,
   });
   log(`watchEvent(WS) AnswerUpdated attached -> ${address}`);
 }
 
-// --- HTTP fallback ---
+// --- HTTP Fallback ---
 async function startHttpPoller(address: Address) {
   if (!httpClient) return;
   log(`httpPoller start -> ${address}`);
@@ -280,6 +312,7 @@ async function startHttpPoller(address: Address) {
       setTimeout(loop, step);
     }
   };
+
   setTimeout(loop, step);
 }
 
@@ -324,6 +357,7 @@ process.on("SIGTERM", async () => {
   await postUpdates();
   process.exit(0);
 });
+
 process.on("SIGINT", async () => {
   log("SIGINT received, flushing...");
   await postUpdates();
