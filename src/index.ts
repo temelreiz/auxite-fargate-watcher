@@ -1,42 +1,6 @@
-// --- WebSocket polyfill for Node (viem + Origin header fix) ---
-import WebSocketBase from "isows";
+// --- WebSocket polyfill & Origin header for viem ---
 
-const {
-  WS_ORIGIN,
-  WS_URL,
-  HTTP_URL,
-  CHAIN = "base",
-  ORACLES = "",
-  WEBHOOK_URL,
-  WEBHOOK_SECRET,
-  ROLLUP_WINDOW_SEC = "0",
-} = process.env as Record<string, string>;
-
-// Origin ekleyen wrapper
-class OriginWebSocket extends (WebSocketBase as any) {
-  constructor(url: string, protocols?: any, options?: any) {
-    // (url, options) formunu da destekle
-    if (protocols && typeof protocols === "object" && !Array.isArray(protocols)) {
-      options = protocols;
-      protocols = undefined;
-    }
-
-    options = options || {};
-    options.headers = {
-      ...(options.headers || {}),
-    };
-
-    if (WS_ORIGIN) {
-      options.headers["Origin"] = WS_ORIGIN;
-    }
-
-    super(url, protocols, options);
-  }
-}
-
-// viem global WebSocket'i kullanıyor
-(globalThis as any).WebSocket = OriginWebSocket as any;
-
+import WebSocketLib from "isows";
 import {
   createPublicClient,
   webSocket,
@@ -57,16 +21,40 @@ const warn = (...a: any[]) =>
 const err = (...a: any[]) =>
   console.error(new Date().toISOString(), "[ERR] ", ...a);
 
-// --- ENV validate ---
+// --- ENV ---
+const {
+  WS_URL,
+  HTTP_URL,
+  CHAIN = "base",
+  ORACLES = "",
+  WEBHOOK_URL,
+  WEBHOOK_SECRET,
+  ROLLUP_WINDOW_SEC = "0",
+  WS_ORIGIN,
+} = process.env as Record<string, string>;
+
 if (!WS_URL) throw new Error("WS_URL missing");
 if (!WEBHOOK_URL) throw new Error("WEBHOOK_URL missing");
 
 const chain: Chain =
   CHAIN === "base-sepolia" ? baseSepolia : CHAIN === "sepolia" ? sepolia : base;
 
+// WebSocket constructor: her bağlantıya Origin ekle
+const WebSocketWithOrigin = (url: string) => {
+  const opts: any = { headers: {} };
+  if (WS_ORIGIN) {
+    opts.headers.Origin = WS_ORIGIN;
+  }
+  return new (WebSocketLib as any)(url, opts);
+};
+
 // --- Clients ---
-const wsTransport = webSocket(WS_URL);
+const wsTransport = webSocket(WS_URL, {
+  // viem burada verdiğimiz ctor'u kullanacak
+  webSocketConstructor: WebSocketWithOrigin as any,
+});
 const wsClient = createPublicClient({ chain, transport: wsTransport });
+
 const httpClient = HTTP_URL
   ? createPublicClient({ chain, transport: http(HTTP_URL) })
   : null;
@@ -80,7 +68,7 @@ const evPriceUpdated = parseAbiItem(
   "event PriceUpdated(uint256 priceE6, address updater, uint256 ts)"
 ) as unknown as AbiEvent;
 
-// --- Oracles list ---
+// --- Oracles ---
 const addrs = ORACLES.split(",")
   .map((s) => s.trim())
   .filter(Boolean) as Address[];
@@ -162,17 +150,16 @@ function schedulePost() {
 
 // --- WS Watchers ---
 function attachWsWatchers(address: Address) {
-  // PriceUpdated
   (wsClient as any).watchEvent({
     address,
     event: evPriceUpdated,
+    batch: true,
     onLogs: (logs: Log[]) => {
       log("↪️ onLogs WS PriceUpdated", address, logs.length);
       for (const lg of logs) {
         const args: any = (lg as any).args;
         const priceE6: bigint = Array.isArray(args) ? args[0] : args?.priceE6;
         const ts: bigint = Array.isArray(args) ? args[2] : args?.ts;
-
         recordOnce(lg, {
           address,
           current: priceE6.toString(),
@@ -184,14 +171,13 @@ function attachWsWatchers(address: Address) {
     },
     onError: (e: any) =>
       err(`watchEvent(WS) PriceUpdated @${address}`, e?.message || e),
-    batch: true,
   });
   log(`watchEvent(WS) PriceUpdated attached -> ${address}`);
 
-  // AnswerUpdated
   (wsClient as any).watchEvent({
     address,
     event: evAnswerUpdated,
+    batch: true,
     onLogs: (logs: Log[]) => {
       log("↪️ onLogs WS AnswerUpdated", address, logs.length);
       for (const lg of logs) {
@@ -200,7 +186,6 @@ function attachWsWatchers(address: Address) {
         const updatedAt: bigint = Array.isArray(args)
           ? args[1]
           : args?.updatedAt;
-
         recordOnce(lg, {
           address,
           current: current.toString(),
@@ -212,7 +197,6 @@ function attachWsWatchers(address: Address) {
     },
     onError: (e: any) =>
       err(`watchEvent(WS) AnswerUpdated @${address}`, e?.message || e),
-    batch: true,
   });
   log(`watchEvent(WS) AnswerUpdated attached -> ${address}`);
 }
