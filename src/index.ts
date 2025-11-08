@@ -1,9 +1,9 @@
 // --- WebSocket polyfill for Node (viem + Origin header) ---
-import { WebSocket as NodeWebSocket } from 'isows';
+import WebSocket from "isows";
 
-const ORIGIN = process.env.WS_ORIGIN || 'https://wallet.auxite.io';
+const ORIGIN = process.env.WS_ORIGIN || "https://wallet.auxite.io";
 
-// viem, globalThis.WebSocket kullanıyor; burada Node için Origin header ekliyoruz.
+// viem globalThis.WebSocket bekliyor; burada Origin header ekleyen bir wrapper veriyoruz.
 (globalThis as any).WebSocket = function (
   url: string,
   protocols?: string | string[]
@@ -14,11 +14,11 @@ const ORIGIN = process.env.WS_ORIGIN || 'https://wallet.auxite.io';
     },
   };
 
-  // isows/WebSocket imzası: (url, protocols?, options?)
+  // isows/WebSocket ctor: (url, protocols?, options?)
   if (protocols) {
-    return new NodeWebSocket(url, protocols as any, options);
+    return new (WebSocket as any)(url, protocols as any, options);
   }
-  return new NodeWebSocket(url, options);
+  return new (WebSocket as any)(url, options);
 };
 
 // --- Imports ---
@@ -30,37 +30,37 @@ import {
   type Address,
   type Log,
   type Chain,
-} from 'viem';
-import type { AbiEvent } from 'abitype';
-import { base, baseSepolia, sepolia } from 'viem/chains';
-import crypto from 'crypto';
-import { request } from 'undici';
+} from "viem";
+import type { AbiEvent } from "abitype";
+import { base, baseSepolia, sepolia } from "viem/chains";
+import crypto from "crypto";
+import { request } from "undici";
 
 // --- Log helpers ---
 const log = (...a: any[]) => console.log(new Date().toISOString(), ...a);
 const warn = (...a: any[]) =>
-  console.warn(new Date().toISOString(), '[WARN]', ...a);
+  console.warn(new Date().toISOString(), "[WARN]", ...a);
 const err = (...a: any[]) =>
-  console.error(new Date().toISOString(), '[ERR] ', ...a);
+  console.error(new Date().toISOString(), "[ERR] ", ...a);
 
 // --- ENV ---
 const {
   WS_URL,
   HTTP_URL,
-  CHAIN = 'base',
-  ORACLES = '',
+  CHAIN = "base",
+  ORACLES = "",
   WEBHOOK_URL,
   WEBHOOK_SECRET,
-  ROLLUP_WINDOW_SEC = '0',
+  ROLLUP_WINDOW_SEC = "0",
 } = process.env as Record<string, string>;
 
-if (!WS_URL) throw new Error('WS_URL missing');
-if (!WEBHOOK_URL) throw new Error('WEBHOOK_URL missing');
+if (!WS_URL) throw new Error("WS_URL missing");
+if (!WEBHOOK_URL) throw new Error("WEBHOOK_URL missing");
 
 const chain: Chain =
-  CHAIN === 'base-sepolia'
+  CHAIN === "base-sepolia"
     ? baseSepolia
-    : CHAIN === 'sepolia'
+    : CHAIN === "sepolia"
     ? sepolia
     : base;
 
@@ -73,18 +73,18 @@ const httpClient = HTTP_URL
 
 // --- Events ---
 const evAnswerUpdated = parseAbiItem(
-  'event AnswerUpdated(int256 current, uint256 updatedAt)'
+  "event AnswerUpdated(int256 current, uint256 updatedAt)"
 ) as unknown as AbiEvent;
 
 const evPriceUpdated = parseAbiItem(
-  'event PriceUpdated(uint256 priceE6, address updater, uint256 ts)'
+  "event PriceUpdated(uint256 priceE6, address updater, uint256 ts)"
 ) as unknown as AbiEvent;
 
 // --- Oracles list ---
-const addrs = ORACLES.split(',')
+const addrs = ORACLES.split(",")
   .map((s) => s.trim())
   .filter(Boolean) as Address[];
-if (addrs.length === 0) warn('No ORACLES provided; watcher will idle.');
+if (addrs.length === 0) warn("No ORACLES provided; watcher will idle.");
 
 type Update = {
   address: Address;
@@ -98,7 +98,7 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 const seen = new Set<string>();
 
 function seenKey(lg: Log): string {
-  const th = (lg as any).transactionHash ?? '0x';
+  const th = (lg as any).transactionHash ?? "0x";
   const li = (lg as any).logIndex ?? -1;
   return `${th}-${li}`;
 }
@@ -122,20 +122,20 @@ async function postUpdates() {
   });
 
   const headers: Record<string, string> = {
-    'content-type': 'application/json',
+    "content-type": "application/json",
   };
   if (WEBHOOK_SECRET) {
     const sig = crypto
-      .createHmac('sha256', WEBHOOK_SECRET)
+      .createHmac("sha256", WEBHOOK_SECRET)
       .update(payload)
-      .digest('hex');
-    headers['x-oracle-signature'] = `sha256=${sig}`;
+      .digest("hex");
+    headers["x-oracle-signature"] = `sha256=${sig}`;
   }
 
   try {
-    log('🛰️ sending payload', payload);
+    log("🛰️ sending payload", payload);
     const res = await request(WEBHOOK_URL, {
-      method: 'POST',
+      method: "POST",
       headers,
       body: payload,
     });
@@ -145,12 +145,12 @@ async function postUpdates() {
       warn(`POST ${WEBHOOK_URL} status=${res.statusCode}`);
     }
   } catch (e) {
-    err('POST failed', e);
+    err("POST failed", e);
   }
 }
 
 function schedulePost() {
-  const roll = Number(ROLLUP_WINDOW_SEC || '0');
+  const roll = Number(ROLLUP_WINDOW_SEC || "0");
   if (roll <= 0) {
     void postUpdates();
     return;
@@ -169,7 +169,7 @@ function attachWsWatchers(address: Address) {
     address,
     event: evPriceUpdated,
     onLogs: (logs: Log[]) => {
-      log('↪️ onLogs WS PriceUpdated', address, logs.length);
+      log("↪️ onLogs WS PriceUpdated", address, logs.length);
       for (const lg of logs) {
         const args: any = (lg as any).args;
         const priceE6: bigint = Array.isArray(args) ? args[0] : args?.priceE6;
@@ -178,7 +178,7 @@ function attachWsWatchers(address: Address) {
         recordOnce(lg, {
           address,
           current: priceE6.toString(),
-          roundId: '0',
+          roundId: "0",
           updatedAt: Number(ts),
         });
       }
@@ -195,7 +195,7 @@ function attachWsWatchers(address: Address) {
     address,
     event: evAnswerUpdated,
     onLogs: (logs: Log[]) => {
-      log('↪️ onLogs WS AnswerUpdated', address, logs.length);
+      log("↪️ onLogs WS AnswerUpdated", address, logs.length);
       for (const lg of logs) {
         const args: any = (lg as any).args;
         const current: bigint = Array.isArray(args)
@@ -208,7 +208,7 @@ function attachWsWatchers(address: Address) {
         recordOnce(lg, {
           address,
           current: current.toString(),
-          roundId: '0',
+          roundId: "0",
           updatedAt: Number(updatedAt),
         });
       }
@@ -245,7 +245,7 @@ async function startHttpPoller(address: Address) {
             toBlock,
           });
           if (logsP.length)
-            log('↪️ HTTP getLogs PriceUpdated', address, logsP.length);
+            log("↪️ HTTP getLogs PriceUpdated", address, logsP.length);
           for (const lg of logsP) {
             const args: any = lg.args;
             const priceE6: bigint = Array.isArray(args)
@@ -255,7 +255,7 @@ async function startHttpPoller(address: Address) {
             recordOnce(lg, {
               address,
               current: priceE6.toString(),
-              roundId: '0',
+              roundId: "0",
               updatedAt: Number(ts),
             });
           }
@@ -271,7 +271,7 @@ async function startHttpPoller(address: Address) {
             toBlock,
           });
           if (logsA.length)
-            log('↪️ HTTP getLogs AnswerUpdated', address, logsA.length);
+            log("↪️ HTTP getLogs AnswerUpdated", address, logsA.length);
           for (const lg of logsA) {
             const args: any = lg.args;
             const current: bigint = Array.isArray(args)
@@ -283,7 +283,7 @@ async function startHttpPoller(address: Address) {
             recordOnce(lg, {
               address,
               current: current.toString(),
-              roundId: '0',
+              roundId: "0",
               updatedAt: Number(updatedAt),
             });
           }
@@ -295,7 +295,7 @@ async function startHttpPoller(address: Address) {
         last = latest;
       }
     } catch (e) {
-      err('httpPoller loop error', e);
+      err("httpPoller loop error", e);
     } finally {
       setTimeout(loop, step);
     }
@@ -312,7 +312,7 @@ function attachWatchers() {
 
 async function main() {
   log(`Watcher starting on ${chain.name} (id=${chain.id})`);
-  log(`Oracles: ${addrs.length > 0 ? addrs.join(',') : '∅'}`);
+  log(`Oracles: ${addrs.length > 0 ? addrs.join(",") : "∅"}`);
   if (addrs.length === 0) return;
 
   try {
@@ -321,7 +321,7 @@ async function main() {
       warn(`⚠️ WS endpoint chainId=${id} != configured=${chain.id}`);
     else log(`✅ WS endpoint verified: chainId=${id}`);
   } catch (e) {
-    warn('Failed to verify WS chainId:', e);
+    warn("Failed to verify WS chainId:", e);
   }
 
   if (httpClient) {
@@ -331,21 +331,21 @@ async function main() {
         warn(`⚠️ HTTP endpoint chainId=${id} != configured=${chain.id}`);
       else log(`✅ HTTP endpoint verified: chainId=${id}`);
     } catch (e) {
-      warn('Failed to verify HTTP chainId:', e);
+      warn("Failed to verify HTTP chainId:", e);
     }
   }
 
   attachWatchers();
-  setInterval(() => log('alive / buffer:', buffer.length), 60_000);
+  setInterval(() => log("alive / buffer:", buffer.length), 60_000);
 }
 
-process.on('SIGTERM', async () => {
-  log('SIGTERM received, flushing...');
+process.on("SIGTERM", async () => {
+  log("SIGTERM received, flushing...");
   await postUpdates();
   process.exit(0);
 });
-process.on('SIGINT', async () => {
-  log('SIGINT received, flushing...');
+process.on("SIGINT", async () => {
+  log("SIGINT received, flushing...");
   await postUpdates();
   process.exit(0);
 });
