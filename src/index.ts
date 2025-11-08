@@ -1,9 +1,16 @@
-// --- WebSocket polyfill for Node (viem + Origin header) ---
-import WebSocket from "isows";
+// --- WebSocket polyfill for Node (viem + WS_ORIGIN desteği) ---
+import * as IsomorphicWS from "isows";
 
+// isows farklı şekillerde export edilebildiği için hepsini karşılayalım
+const BaseWS: any =
+  (IsomorphicWS as any).WebSocket ||
+  (IsomorphicWS as any).default ||
+  (IsomorphicWS as any);
+
+// WS_ORIGIN ECS env'den geliyor, yoksa wallet.auxite.io
 const ORIGIN = process.env.WS_ORIGIN || "https://wallet.auxite.io";
 
-// viem globalThis.WebSocket bekliyor; burada Origin header ekleyen bir wrapper veriyoruz.
+// viem globalThis.WebSocket kullanıyor; biz de Origin header ekleyen wrapper veriyoruz
 (globalThis as any).WebSocket = function (
   url: string,
   protocols?: string | string[]
@@ -14,11 +21,10 @@ const ORIGIN = process.env.WS_ORIGIN || "https://wallet.auxite.io";
     },
   };
 
-  // isows/WebSocket ctor: (url, protocols?, options?)
   if (protocols) {
-    return new (WebSocket as any)(url, protocols as any, options);
+    return new BaseWS(url, protocols as any, options);
   }
-  return new (WebSocket as any)(url, options);
+  return new BaseWS(url, options);
 };
 
 // --- Imports ---
@@ -172,7 +178,9 @@ function attachWsWatchers(address: Address) {
       log("↪️ onLogs WS PriceUpdated", address, logs.length);
       for (const lg of logs) {
         const args: any = (lg as any).args;
-        const priceE6: bigint = Array.isArray(args) ? args[0] : args?.priceE6;
+        const priceE6: bigint = Array.isArray(args)
+          ? args[0]
+          : args?.priceE6;
         const ts: bigint = Array.isArray(args) ? args[2] : args?.ts;
 
         recordOnce(lg, {
