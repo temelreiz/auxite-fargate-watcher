@@ -1,30 +1,42 @@
-// --- WebSocket polyfill for Node (viem için gerekli) ---
 import * as IsoWS from "isows";
+import crypto from "crypto";
+import { request } from "undici";
 
-const { WS_ORIGIN } = process.env as Record<string, string>;
+const log = (...a: any[]) => console.log(new Date().toISOString(), ...a);
+const warn = (...a: any[]) =>
+  console.warn(new Date().toISOString(), "[WARN]", ...a);
+const err = (...a: any[]) =>
+  console.error(new Date().toISOString(), "[ERR] ", ...a);
 
-// isows / ws default export veya named export olabilir, hepsini karşılayalım
+// --- ENV ---
+
+const {
+  WS_URL,
+  WS_ORIGIN,
+  WEBHOOK_URL,
+  WEBHOOK_SECRET,
+  NODE_ENV = "production",
+} = process.env as Record<string, string>;
+
+if (!WS_URL) throw new Error("WS_URL missing");
+if (!WEBHOOK_URL) throw new Error("WEBHOOK_URL missing");
+
+// --- WebSocket client with Origin header (Cloudflare için) ---
+
 const BaseWebSocket =
   (IsoWS as any).WebSocket ||
   (IsoWS as any).default ||
   (IsoWS as any);
 
-/**
- * viem -> globalThis.WebSocket -> OriginWebSocket -> isows
- * Burada Cloudflare'in beklediği Origin header'ını ekliyoruz.
- */
 class OriginWebSocket extends BaseWebSocket {
   constructor(url: string, protocols?: any, options?: any) {
-    // ws / isows signature:
-    // new WebSocket(address, protocols?, options?)
-    // Eğer ikinci argüman object ise aslında options'tır.
+    // ws signature: (url, protocols?, options?)
     if (protocols && typeof protocols === "object" && !Array.isArray(protocols)) {
       options = protocols;
       protocols = undefined;
     }
 
     options = options || {};
-
     if (WS_ORIGIN) {
       options.headers = {
         ...(options.headers || {}),
@@ -36,108 +48,46 @@ class OriginWebSocket extends BaseWebSocket {
   }
 }
 
-// viem bundan sonrasını otomatik kullanacak
-(globalThis as any).WebSocket = OriginWebSocket;
+// --- Types ---
 
-// --- Imports ---
-import {
-  createPublicClient,
-  webSocket,
-  http,
-  parseAbiItem,
-  type Address,
-  type Log,
-  type Chain,
-} from "viem";
-import type { AbiEvent } from "abitype";
-import { base, baseSepolia, sepolia } from "viem/chains";
-import crypto from "crypto";
-import { request } from "undici";
-
-// --- Logger helpers ---
-const log = (...a: any[]) => console.log(new Date().toISOString(), ...a);
-const warn = (...a: any[]) =>
-  console.warn(new Date().toISOString(), "[WARN]", ...a);
-const err = (...a: any[]) =>
-  console.error(new Date().toISOString(), "[ERR] ", ...a);
-
-// --- ENV ---
-const {
-  WS_URL,
-  HTTP_URL,
-  CHAIN = "base",
-  ORACLES = "",
-  WEBHOOK_URL,
-  WEBHOOK_SECRET,
-  ROLLUP_WINDOW_SEC = "0",
-} = process.env as Record<string, string>;
-
-if (!WS_URL) throw new Error("WS_URL missing");
-if (!WEBHOOK_URL) throw new Error("WEBHOOK_URL missing");
-
-const chain: Chain =
-  CHAIN === "base-sepolia"
-    ? baseSepolia
-    : CHAIN === "sepolia"
-    ? sepolia
-    : base;
-
-// --- Clients ---
-const wsTransport = webSocket(WS_URL);
-const wsClient = createPublicClient({ chain, transport: wsTransport });
-
-const httpClient = HTTP_URL
-  ? createPublicClient({ chain, transport: http(HTTP_URL) })
-  : null;
-
-// --- Events ---
-const evAnswerUpdated = parseAbiItem(
-  "event AnswerUpdated(int256 current, uint256 updatedAt)"
-) as unknown as AbiEvent;
-
-const evPriceUpdated = parseAbiItem(
-  "event PriceUpdated(uint256 priceE6, address updater, uint256 ts)"
-) as unknown as AbiEvent;
-
-// --- Oracles list ---
-const addrs = ORACLES.split(",")
-  .map((s) => s.trim())
-  .filter(Boolean) as Address[];
-if (addrs.length === 0) warn("No ORACLES provided; watcher will idle.");
-
-type Update = {
-  address: Address;
-  current: string;
-  roundId: string;
-  updatedAt: number;
+type FeedPrice = {
+  symbol: string;
+  // server tarafının payload adlandırmasına göre esneklik:
+  priceGram?: number;
+  price_g?: number;
+  price?: number;
 };
 
-let buffer: Update[] = [];
-let timer: ReturnType<typeof setTimeout> | null = null;
-const seen = new Set<string>();
+type FeedMessage = {
+  type: string;
+  data?: FeedPrice[];
+};
 
-function seenKey(lg: Log): string {
-  const th = (lg as any).transactionHash ?? "0x";
-  const li = (lg as any).logIndex ?? -1;
-  return `${th}-${li}`;
+type OracleUpdate = {
+  symbol: string;
+  pricePerGram: number;
+  ts: number;
+};
+
+// --- State ---
+
+let lastHeartbeat = Date.now();
+
+// --- Helpers ---
+
+function extractPricePerGram(p: FeedPrice): number | null {
+  if (typeof p.priceGram === "number") return p.priceGram;
+  if (typeof p.price_g === "number") return p.price_g;
+  if (typeof p.price === "number") return p.price;
+  return null;
 }
 
-function recordOnce(lg: Log, rec: Update) {
-  const k = seenKey(lg);
-  if (seen.has(k)) return;
-  seen.add(k);
-  if (seen.size > 5000) seen.clear();
-  buffer.push(rec);
-}
-
-async function postUpdates() {
-  if (buffer.length === 0) return;
-  const batch = buffer.splice(0, buffer.length);
+async function postUpdates(updates: OracleUpdate[]) {
+  if (!updates.length) return;
 
   const payload = JSON.stringify({
-    chainId: chain.id,
-    updates: batch,
     ts: Math.floor(Date.now() / 1000),
+    prices: updates,
   });
 
   const headers: Record<string, string> = {
@@ -153,14 +103,18 @@ async function postUpdates() {
   }
 
   try {
-    console.log("🛰️ sending payload", payload);
-    const res = await request(WEBHOOK_URL, {
+    const res = await request(WEBHOOK_URL!, {
       method: "POST",
       headers,
       body: payload,
     });
+
     if (res.statusCode >= 200 && res.statusCode < 300) {
-      log(`POST ${WEBHOOK_URL} OK (${batch.length})`);
+      log(
+        `POST ${WEBHOOK_URL} OK (${updates.length} symbols: ${updates
+          .map((u) => u.symbol)
+          .join(",")})`
+      );
     } else {
       warn(`POST ${WEBHOOK_URL} status=${res.statusCode}`);
     }
@@ -169,217 +123,84 @@ async function postUpdates() {
   }
 }
 
-function schedulePost() {
-  const roll = Number(ROLLUP_WINDOW_SEC || "0");
-  if (roll <= 0) {
-    void postUpdates();
+function handleMessage(raw: string) {
+  let msg: FeedMessage;
+  try {
+    msg = JSON.parse(raw);
+  } catch {
     return;
   }
-  if (timer) return;
-  timer = setTimeout(() => {
-    timer = null;
-    void postUpdates();
-  }, roll * 1000);
+
+  if (msg.type !== "prices" || !Array.isArray(msg.data)) return;
+
+  const wanted = new Set(["AUXG", "AUXS", "AUXPT", "AUXPD"]);
+
+  const updates: OracleUpdate[] = [];
+
+  for (const p of msg.data) {
+    if (!p || !p.symbol || !wanted.has(p.symbol)) continue;
+    const price = extractPricePerGram(p);
+    if (price == null || !isFinite(price)) continue;
+
+    updates.push({
+      symbol: p.symbol,
+      pricePerGram: price,
+      ts: Math.floor(Date.now() / 1000),
+    });
+  }
+
+  if (updates.length) {
+    log(
+      `Received prices: ${updates
+        .map((u) => `${u.symbol}=${u.pricePerGram}`)
+        .join(" ")}`
+    );
+    void postUpdates(updates);
+  }
 }
 
-// --- WS Watchers ---
-function attachWsWatchers(address: Address) {
-  // PriceUpdated
-  (wsClient as any).watchEvent({
-    address,
-    event: evPriceUpdated,
-    onLogs: (logs: Log[]) => {
-      console.log("↪️ onLogs WS PriceUpdated", address, logs.length);
-      for (const lg of logs) {
-        const args: any = (lg as any).args;
-        const priceE6: bigint = Array.isArray(args)
-          ? args[0]
-          : args?.priceE6;
-        const ts: bigint = Array.isArray(args) ? args[2] : args?.ts;
+// --- Main loop ---
 
-        recordOnce(lg, {
-          address,
-          current: priceE6.toString(),
-          roundId: "0",
-          updatedAt: Number(ts),
-        });
-      }
-      schedulePost();
-    },
-    onError: (e: any) =>
-      err(`watchEvent(WS) PriceUpdated @${address}`, e?.message || e),
-    batch: true,
-  });
-  log(`watchEvent(WS) PriceUpdated attached -> ${address}`);
+function connect() {
+  log(`Connecting to WS ${WS_URL} (origin=${WS_ORIGIN || "-"})`);
 
-  // AnswerUpdated
-  (wsClient as any).watchEvent({
-    address,
-    event: evAnswerUpdated,
-    onLogs: (logs: Log[]) => {
-      console.log("↪️ onLogs WS AnswerUpdated", address, logs.length);
-      for (const lg of logs) {
-        const args: any = (lg as any).args;
-        const current: bigint = Array.isArray(args)
-          ? args[0]
-          : args?.current;
-        const updatedAt: bigint = Array.isArray(args)
-          ? args[1]
-          : args?.updatedAt;
+  const ws = new OriginWebSocket(WS_URL);
 
-        recordOnce(lg, {
-          address,
-          current: current.toString(),
-          roundId: "0",
-          updatedAt: Number(updatedAt),
-        });
-      }
-      schedulePost();
-    },
-    onError: (e: any) =>
-      err(`watchEvent(WS) AnswerUpdated @${address}`, e?.message || e),
-    batch: true,
-  });
-  log(`watchEvent(WS) AnswerUpdated attached -> ${address}`);
-}
-
-// --- HTTP Fallback ---
-async function startHttpPoller(address: Address) {
-  if (!httpClient) return;
-  log(`httpPoller start -> ${address}`);
-
-  let last: bigint = await httpClient.getBlockNumber();
-  last = last > 10n ? last - 10n : 0n;
-  const step = 3_000;
-
-  const loop = async () => {
-    try {
-      const latest = await httpClient.getBlockNumber();
-      if (latest > last) {
-        const fromBlock = last + 1n;
-        const toBlock = latest;
-
-        try {
-          const logsP = await (httpClient as any).getLogs({
-            address,
-            event: evPriceUpdated,
-            fromBlock,
-            toBlock,
-          });
-          if (logsP.length)
-            console.log(
-              "↪️ HTTP getLogs PriceUpdated",
-              address,
-              logsP.length
-            );
-          for (const lg of logsP) {
-            const args: any = lg.args;
-            const priceE6: bigint = Array.isArray(args)
-              ? args[0]
-              : args?.priceE6;
-            const ts: bigint = Array.isArray(args) ? args[2] : args?.ts;
-            recordOnce(lg, {
-              address,
-              current: priceE6.toString(),
-              roundId: "0",
-              updatedAt: Number(ts),
-            });
-          }
-        } catch (e) {
-          err(`HTTP getLogs PriceUpdated @${address}`, e);
-        }
-
-        try {
-          const logsA = await (httpClient as any).getLogs({
-            address,
-            event: evAnswerUpdated,
-            fromBlock,
-            toBlock,
-          });
-          if (logsA.length)
-            console.log(
-              "↪️ HTTP getLogs AnswerUpdated",
-              address,
-              logsA.length
-            );
-          for (const lg of logsA) {
-            const args: any = lg.args;
-            const current: bigint = Array.isArray(args)
-              ? args[0]
-              : args?.current;
-            const updatedAt: bigint = Array.isArray(args)
-              ? args[1]
-              : args?.updatedAt;
-            recordOnce(lg, {
-              address,
-              current: current.toString(),
-              roundId: "0",
-              updatedAt: Number(updatedAt),
-            });
-          }
-        } catch (e) {
-          err(`HTTP getLogs AnswerUpdated @${address}`, e);
-        }
-
-        schedulePost();
-        last = latest;
-      }
-    } catch (e) {
-      err("httpPoller loop error", e);
-    } finally {
-      setTimeout(loop, step);
-    }
+  ws.onopen = () => {
+    log("WS connected");
+    lastHeartbeat = Date.now();
   };
 
-  setTimeout(loop, step);
+  ws.onmessage = (ev: any) => {
+    lastHeartbeat = Date.now();
+    const data =
+      typeof ev.data === "string" ? ev.data : ev.data?.toString?.() ?? "";
+    if (!data) return;
+    handleMessage(data);
+  };
+
+  ws.onerror = (ev: any) => {
+    err("WS error", ev?.message || ev);
+  };
+
+  ws.onclose = (ev: any) => {
+    warn(
+      `WS closed code=${ev?.code} reason=${ev?.reason || ""}, reconnecting...`
+    );
+    setTimeout(connect, 3000);
+  };
 }
 
-function attachWatchers() {
-  for (const address of addrs) {
-    attachWsWatchers(address);
-    if (httpClient) void startHttpPoller(address);
-  }
-}
+// --- Health log ---
 
-async function main() {
-  log(`Watcher starting on ${chain.name} (id=${chain.id})`);
-  log(`Oracles: ${addrs.length > 0 ? addrs.join(",") : "∅"}`);
-  if (addrs.length === 0) return;
+setInterval(() => {
+  const diff = Math.floor((Date.now() - lastHeartbeat) / 1000);
+  log(`alive / lastMessageAgo=${diff}s`);
+}, 60_000);
 
-  try {
-    const id = await wsClient.getChainId();
-    if (id !== chain.id)
-      warn(`⚠️ WS endpoint chainId=${id} != configured=${chain.id}`);
-    else log(`✅ WS endpoint verified: chainId=${id}`);
-  } catch (e) {
-    warn("Failed to verify WS chainId:", e);
-  }
+// --- Start ---
 
-  if (httpClient) {
-    try {
-      const id = await httpClient.getChainId();
-      if (id !== chain.id)
-        warn(`⚠️ HTTP endpoint chainId=${id} != configured=${chain.id}`);
-      else log(`✅ HTTP endpoint verified: chainId=${id}`);
-    } catch (e) {
-      warn("Failed to verify HTTP chainId:", e);
-    }
-  }
-
-  attachWatchers();
-  setInterval(() => log("alive / buffer:", buffer.length), 60_000);
-}
-
-process.on("SIGTERM", async () => {
-  log("SIGTERM received, flushing...");
-  await postUpdates();
-  process.exit(0);
-});
-
-process.on("SIGINT", async () => {
-  log("SIGINT received, flushing...");
-  await postUpdates();
-  process.exit(0);
-});
-
-void main();
+log(
+  `Auxite watcher starting (mode=price-feed, url=${WS_URL}, env=${NODE_ENV})`
+);
+connect();
