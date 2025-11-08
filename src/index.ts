@@ -1,8 +1,45 @@
 // --- WebSocket polyfill for Node (viem için gerekli) ---
-import * as WebSocket from "isows";
-(globalThis as any).WebSocket =
-  (WebSocket as any).WebSocket || (WebSocket as any);
+import * as IsoWS from "isows";
 
+const { WS_ORIGIN } = process.env as Record<string, string>;
+
+// isows / ws default export veya named export olabilir, hepsini karşılayalım
+const BaseWebSocket =
+  (IsoWS as any).WebSocket ||
+  (IsoWS as any).default ||
+  (IsoWS as any);
+
+/**
+ * viem -> globalThis.WebSocket -> OriginWebSocket -> isows
+ * Burada Cloudflare'in beklediği Origin header'ını ekliyoruz.
+ */
+class OriginWebSocket extends BaseWebSocket {
+  constructor(url: string, protocols?: any, options?: any) {
+    // ws / isows signature:
+    // new WebSocket(address, protocols?, options?)
+    // Eğer ikinci argüman object ise aslında options'tır.
+    if (protocols && typeof protocols === "object" && !Array.isArray(protocols)) {
+      options = protocols;
+      protocols = undefined;
+    }
+
+    options = options || {};
+
+    if (WS_ORIGIN) {
+      options.headers = {
+        ...(options.headers || {}),
+        Origin: WS_ORIGIN,
+      };
+    }
+
+    super(url, protocols, options);
+  }
+}
+
+// viem bundan sonrasını otomatik kullanacak
+(globalThis as any).WebSocket = OriginWebSocket;
+
+// --- Imports ---
 import {
   createPublicClient,
   webSocket,
@@ -17,6 +54,7 @@ import { base, baseSepolia, sepolia } from "viem/chains";
 import crypto from "crypto";
 import { request } from "undici";
 
+// --- Logger helpers ---
 const log = (...a: any[]) => console.log(new Date().toISOString(), ...a);
 const warn = (...a: any[]) =>
   console.warn(new Date().toISOString(), "[WARN]", ...a);
@@ -38,11 +76,16 @@ if (!WS_URL) throw new Error("WS_URL missing");
 if (!WEBHOOK_URL) throw new Error("WEBHOOK_URL missing");
 
 const chain: Chain =
-  CHAIN === "base-sepolia" ? baseSepolia : CHAIN === "sepolia" ? sepolia : base;
+  CHAIN === "base-sepolia"
+    ? baseSepolia
+    : CHAIN === "sepolia"
+    ? sepolia
+    : base;
 
 // --- Clients ---
 const wsTransport = webSocket(WS_URL);
 const wsClient = createPublicClient({ chain, transport: wsTransport });
+
 const httpClient = HTTP_URL
   ? createPublicClient({ chain, transport: http(HTTP_URL) })
   : null;
@@ -97,7 +140,10 @@ async function postUpdates() {
     ts: Math.floor(Date.now() / 1000),
   });
 
-  const headers: Record<string, string> = { "content-type": "application/json" };
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  };
+
   if (WEBHOOK_SECRET) {
     const sig = crypto
       .createHmac("sha256", WEBHOOK_SECRET)
@@ -146,7 +192,9 @@ function attachWsWatchers(address: Address) {
       console.log("↪️ onLogs WS PriceUpdated", address, logs.length);
       for (const lg of logs) {
         const args: any = (lg as any).args;
-        const priceE6: bigint = Array.isArray(args) ? args[0] : args?.priceE6;
+        const priceE6: bigint = Array.isArray(args)
+          ? args[0]
+          : args?.priceE6;
         const ts: bigint = Array.isArray(args) ? args[2] : args?.ts;
 
         recordOnce(lg, {
@@ -172,7 +220,9 @@ function attachWsWatchers(address: Address) {
       console.log("↪️ onLogs WS AnswerUpdated", address, logs.length);
       for (const lg of logs) {
         const args: any = (lg as any).args;
-        const current: bigint = Array.isArray(args) ? args[0] : args?.current;
+        const current: bigint = Array.isArray(args)
+          ? args[0]
+          : args?.current;
         const updatedAt: bigint = Array.isArray(args)
           ? args[1]
           : args?.updatedAt;
@@ -280,6 +330,7 @@ async function startHttpPoller(address: Address) {
       setTimeout(loop, step);
     }
   };
+
   setTimeout(loop, step);
 }
 
@@ -324,6 +375,7 @@ process.on("SIGTERM", async () => {
   await postUpdates();
   process.exit(0);
 });
+
 process.on("SIGINT", async () => {
   log("SIGINT received, flushing...");
   await postUpdates();
