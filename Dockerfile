@@ -3,11 +3,11 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# 1) Dependencies
+# 1) Install deps (devDeps dahil)
 COPY package*.json ./
 RUN npm ci
 
-# 2) TS config + source
+# 2) Copy sources
 COPY tsconfig.json ./
 COPY src ./src
 
@@ -20,11 +20,11 @@ FROM node:20-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 
-# Sadece runtime bağımlılıkları
+# Sadece prod deps
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-# Build edilmiş kodu al
+# Derlenmiş kod
 COPY --from=builder /app/dist ./dist
 
 CMD ["node", "dist/index.js"]

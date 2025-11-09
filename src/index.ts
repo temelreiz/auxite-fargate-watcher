@@ -1,167 +1,112 @@
-import WebSocket, { RawData } from "ws";
+import WebSocket from "ws";
 import axios from "axios";
 
-// ---- Env config ----
 const WS_URL = process.env.WS_URL || "wss://api.auxite.io/ws/prices";
 const WS_ORIGIN = process.env.WS_ORIGIN || "https://wallet.auxite.io";
+const WEBHOOK_URL =
+  process.env.WEBHOOK_URL || "https://wallet.auxite.io/api/oracle-hook";
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "auxite-shared-secret";
+const DEBUG_WS = process.env.DEBUG_WS === "true";
 
-const CHAIN = (process.env.CHAIN || "base").toLowerCase();
-
-const ORACLES = (process.env.ORACLES || "")
-  .split(",")
-  .map((a) => a.trim().toLowerCase())
-  .filter(Boolean);
-
-const WEBHOOK_URL = process.env.WEBHOOK_URL || "";
-const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "";
-
-const DEBUG_WS = (process.env.DEBUG_WS || "false").toLowerCase() === "true";
-
-if (!WEBHOOK_URL) {
-  console.error("Missing WEBHOOK_URL env");
-}
-
-if (!WEBHOOK_SECRET) {
-  console.error("Missing WEBHOOK_SECRET env");
-}
-
-// ---- Types ----
 interface PriceMessage {
-  chain: string;
-  oracle: string;
-  payload: unknown;
-  [key: string]: unknown;
+  type: string;
+  [key: string]: any;
 }
 
-// ---- State ----
 let ws: WebSocket | null = null;
 let reconnectTimeout: NodeJS.Timeout | null = null;
-let aliveLogInterval: NodeJS.Timeout | null = null;
-let buffer: PriceMessage[] = [];
+let lastSequence = 0;
 
-// ---- Helpers ----
-function log(...args: unknown[]) {
-  // production'da çok gürültü olmasın dersen DEBUG_WS ile kontrol
-  if (DEBUG_WS) {
-    console.log(...args);
-  }
+function log(...args: any[]) {
+  console.log(new Date().toISOString(), ...args);
 }
 
 function connect() {
-  if (ws) {
-    try {
-      ws.terminate();
-    } catch {
-      // ignore
-    }
-    ws = null;
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return;
   }
 
-  log("Connecting to WS:", WS_URL);
+  log("connecting to ws:", WS_URL, "Origin:", WS_ORIGIN);
 
   ws = new WebSocket(WS_URL, {
     headers: {
-      // Origin header'ı burada önemli: API Cloudflare/ALB bu header'a bakıyor
-      Origin: WS_ORIGIN,
-    },
+      Origin: WS_ORIGIN
+    }
   });
 
   ws.on("open", () => {
-    console.log("WS connected:", WS_URL);
-
-    // alive log
-    if (aliveLogInterval) clearInterval(aliveLogInterval);
-    aliveLogInterval = setInterval(() => {
-      console.log(
-        `${new Date().toISOString()} alive / buffer: ${buffer.length}`
-      );
-    }, 60_000);
+    log("ws connected");
   });
 
-  ws.on("message", (data: RawData) => {
+  ws.on("message", (data: WebSocket.RawData) => {
     try {
-      const text = data.toString("utf8");
-      const msg = JSON.parse(text) as PriceMessage;
-
-      // chain filter
-      if (msg.chain && msg.chain.toLowerCase() !== CHAIN) {
-        return;
+      const text = data.toString();
+      if (DEBUG_WS) {
+        log("ws message:", text);
       }
 
-      // oracle filter (varsa)
-      if (
-        ORACLES.length > 0 &&
-        msg.oracle &&
-        !ORACLES.includes(msg.oracle.toLowerCase())
-      ) {
-        return;
+      const msg: PriceMessage = JSON.parse(text);
+
+      if (typeof msg.sequence === "number") {
+        if (msg.sequence <= lastSequence) {
+          return;
+        }
+        lastSequence = msg.sequence;
       }
 
-      buffer.push(msg);
-    } catch (err) {
-      console.error("Failed to parse WS message:", err);
+      forwardToWebhook(msg).catch((err) => {
+        log("webhook error:", err?.message || err);
+      });
+    } catch (err: any) {
+      log("message parse error:", err?.message || err);
     }
   });
 
   ws.on("error", (err: Error) => {
-    console.error("WS error:", err.message || err);
+    log("ws error:", err.message || err);
   });
 
   ws.on("close", (code: number, reason: Buffer) => {
-    console.warn(
-      `WS closed: code=${code}, reason=${reason.toString("utf8") || "n/a"}`
-    );
-
-    if (aliveLogInterval) {
-      clearInterval(aliveLogInterval);
-      aliveLogInterval = null;
-    }
-
-    // Otomatik reconnect
-    if (!reconnectTimeout) {
-      reconnectTimeout = setTimeout(() => {
-        reconnectTimeout = null;
-        connect();
-      }, 5000);
-    }
+    const reasonStr = reason?.toString() || "";
+    log("ws closed:", code, reasonStr);
+    scheduleReconnect();
   });
 }
 
-async function flushBuffer() {
-  if (!WEBHOOK_URL || buffer.length === 0) return;
+function scheduleReconnect() {
+  if (reconnectTimeout) return;
+  reconnectTimeout = setTimeout(() => {
+    reconnectTimeout = null;
+    connect();
+  }, 5000);
+}
 
-  const batch = buffer;
-  buffer = [];
-
+async function forwardToWebhook(payload: any) {
   try {
     await axios.post(
       WEBHOOK_URL,
-      {
-        chain: CHAIN,
-        events: batch,
-      },
+      payload,
       {
         headers: {
           "Content-Type": "application/json",
-          "X-Auxite-Webhook-Secret": WEBHOOK_SECRET,
+          "X-Auxite-Secret": WEBHOOK_SECRET
         },
-        timeout: 10_000,
+        timeout: 5000
       }
     );
-    log(`Flushed ${batch.length} events to webhook`);
+    if (DEBUG_WS) {
+      log("webhook sent");
+    }
   } catch (err: any) {
-    console.error(
-      "Failed to POST webhook:",
-      err?.response?.status,
-      err?.response?.data || err?.message || err
-    );
-    // Başarısız olursa batch'i kaybetmeyelim:
-    buffer = [...batch, ...buffer];
+    log("webhook post failed:", err?.message || err);
   }
 }
 
-// ---- Start ----
-connect();
+function startAliveLogger() {
+  setInterval(() => {
+    log("alive / buffer:", ws && ws.readyState === WebSocket.OPEN ? (ws as any)._bufferedAmount || 0 : 0);
+  }, 60000);
+}
 
-// Her 5 saniyede bir buffer flush
-setInterval(flushBuffer, 5000);
+connect();
+startAliveLogger();
